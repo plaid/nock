@@ -1,3 +1,4 @@
+
 var fs      = require('fs');
 var nock    = require('../.');
 var http    = require('http');
@@ -8,6 +9,28 @@ var stream  = require('stream');
 var test    = require('tap').test;
 var mikealRequest = require('request');
 var superagent = require('superagent');
+var _       = require('lodash');
+var needle  = require("needle");
+var restify = require('restify');
+var domain  = require('domain');
+var hyperquest = require('hyperquest');
+
+
+test("double activation throws exception", function(t) {
+  nock.restore();
+  t.false(nock.isActive());
+  try {
+    nock.activate();
+    t.true(nock.isActive());
+    nock.activate();
+    //  This line should never be reached.
+    t.false(true);
+  } catch(e) {
+    t.equal(e.toString(), 'Error: Nock already active');
+  }
+  t.true(nock.isActive());
+  t.end();
+});
 
 test("allow override works (2)", function(t) {
   var scope =
@@ -15,7 +38,7 @@ test("allow override works (2)", function(t) {
     post("/post").
     reply(200,"99problems");
 
-  options = {
+  var options = {
     method: "POST",
     uri: "https://httpbin.org/post",
     json: {
@@ -242,6 +265,36 @@ test("get with reply callback", function(t) {
   req.end();
 });
 
+test("get to different subdomain with reply callback and filtering scope", function(t) {
+  //  We scope for www.google.com but through scope filtering we
+  //  will accept any <subdomain>.google.com
+  var scope = nock('http://www.google.com', {
+      filteringScope: function(scope) {
+        return /^http:\/\/.*\.google\.com/.test(scope);
+      }
+    })
+    .get('/')
+    .reply(200, function() {
+      return 'OK!';
+    });
+
+  var req = http.request({
+     host: "any-subdomain-will-do.google.com"
+    , path: '/'
+    , port: 80
+  }, function(res) {
+    res.on('end', function() {
+      scope.done();
+      t.end();
+    });
+    res.on('data', function(data) {
+      t.equal(data.toString(), 'OK!', 'response should match');
+    });
+  });
+
+  req.end();
+});
+
 test("get with reply callback returning object", function(t) {
   var scope = nock('http://www.googlezzzz.com')
      .get('/')
@@ -292,6 +345,35 @@ test("post with reply callback, uri, and request body", function(t) {
 
   req.write(input);
   req.end();
+});
+
+test("post with chaining on call", function(t) {
+  var input = 'key=val';
+
+  var scope = nock('http://www.google.com')
+     .post('/echo', input)
+     .reply(200, function(uri, body) {
+        return ['OK', uri, body].join(' ');
+     });
+
+  var req = http.request({
+     host: "www.google.com"
+    , method: 'POST'
+    , path: '/echo'
+    , port: 80
+  }, function(res) {
+    res.on('end', function() {
+      scope.done();
+      t.end();
+    });
+    res.on('data', function(data) {
+      t.equal(data.toString(), 'OK /echo key=val' , 'response should match');
+    });
+  }).on('error', function(error){
+    t.equal(error, null);
+    t.end();
+  });
+  req.end(input);
 });
 
 test("reply with callback and filtered path and body", function(t) {
@@ -499,6 +581,64 @@ test("match headers with regexp", function(t) {
     , path: '/'
     , port: 80
     , headers: {'X-My-Headers': 'My Header 1.0'}
+  }, function(res) {
+    res.setEncoding('utf8');
+    t.equal(res.statusCode, 200);
+
+    res.on('data', function(data) {
+      t.equal(data, 'Hello World!');
+    });
+
+    res.on('end', function() {
+      scope.done();
+      t.end();
+    });
+  });
+
+});
+
+test("match headers on number with regexp", function(t) {
+  var scope = nock('http://www.headier.com')
+     .get('/')
+     .matchHeader('x-my-headers', /\d+/)
+     .reply(200, "Hello World!");
+
+  http.get({
+     host: "www.headier.com"
+    , method: 'GET'
+    , path: '/'
+    , port: 80
+    , headers: {'X-My-Headers': 123}
+  }, function(res) {
+    res.setEncoding('utf8');
+    t.equal(res.statusCode, 200);
+
+    res.on('data', function(data) {
+      t.equal(data, 'Hello World!');
+    });
+
+    res.on('end', function() {
+      scope.done();
+      t.end();
+    });
+  });
+
+});
+
+test("match headers with function", function(t) {
+  var scope = nock('http://www.headier.com')
+     .get('/')
+     .matchHeader('x-my-headers', function (val) {
+        return val > 123;
+     })
+     .reply(200, "Hello World!");
+
+  http.get({
+     host: "www.headier.com"
+    , method: 'GET'
+    , path: '/'
+    , port: 80
+    , headers: {'X-My-Headers': 456}
   }, function(res) {
     res.setEncoding('utf8');
     t.equal(res.statusCode, 200);
@@ -836,6 +976,37 @@ test("reply with file and pipe response", function(t) {
     t.equal(res.statusCode, 200);
 
   });
+
+});
+
+test("reply with file with headers", function(t) {
+  var dataCalled = false
+
+  var scope = nock('http://www.filereplier2.com')
+    .get('/')
+    .replyWithFile(200, __dirname + '/../assets/reply_file_2.txt.gz', {
+      'content-encoding': 'gzip'
+    });
+
+  var req = http.request({
+      host: "www.filereplier2.com"
+    , path: '/'
+    , port: 80
+  }, function(res) {
+
+    t.equal(res.statusCode, 200);
+    res.on('end', function() {
+      t.ok(dataCalled);
+      t.end();
+    });
+    res.on('data', function(data) {
+      dataCalled = true;
+      t.equal(data.length, 57);
+    });
+
+  });
+
+  req.end();
 
 });
 
@@ -1265,6 +1436,26 @@ test("can use hostname instead of host", function(t) {
   req.end();
 });
 
+test('hostname is case insensitive', function(t) {
+  var scope = nock('http://caseinsensitive.com')
+     .get('/path')
+     .reply(200, "hey");
+
+  var options = {
+    hostname: 'cASEinsensitivE.com',
+    path: '/path',
+    method: 'GET'
+  };
+
+  var req = http.request(options, function(res) {
+    scope.done();
+    t.end();
+  });
+
+  req.end();
+});
+
+
 test("can take a port", function(t) {
   var scope = nock('http://www.myserver.com:3333')
     .get('/')
@@ -1313,26 +1504,53 @@ test("can use https", function(t) {
   req.end();
 });
 
-test("complaints if https route is missing", function(t) {
+test("emits error if https route is missing", function(t) {
   var dataCalled = false
 
   var scope = nock('https://google.com')
     .get('/')
     .reply(200, "Hello World!");
 
-  try {
-    var req = https.request({
-        host: "google.com"
-      , path: '/abcdef892932'
-    }, function(res) {
-      throw new Error('should not come here!');
-    }).end();
-  } catch (err) {
-    t.ok(err.message.match(/No match for HTTP request GET \/abcdef892932/));
+  var req = https.request({
+      host: "google.com"
+    , path: '/abcdef892932'
+  }, function(res) {
+    throw new Error('should not come here!');
+  });
+
+  req.end();
+
+  // This listener is intentionally after the end call so make sure that
+  // listeners added after the end will catch the error
+  req.on('error', function (err) {
+    t.equal(err.message.trim(), 'Nock: No match for request GET https://google.com/abcdef892932');
     t.end();
-  }
+  });
+});
 
+test("emits error if https route is missing", function(t) {
+  var dataCalled = false
 
+  var scope = nock('https://google.com:123')
+    .get('/')
+    .reply(200, "Hello World!");
+
+  var req = https.request({
+      host: "google.com",
+      port: 123,
+      path: '/dsadsads'
+  }, function(res) {
+    throw new Error('should not come here!');
+  });
+
+  req.end();
+
+  // This listener is intentionally after the end call so make sure that
+  // listeners added after the end will catch the error
+  req.on('error', function (err) {
+    t.equal(err.message.trim(), 'Nock: No match for request GET https://google.com:123/dsadsads');
+    t.end();
+  });
 });
 
 test("can use ClientRequest using GET", function(t) {
@@ -1510,11 +1728,12 @@ test("allow unmocked option works", function(t) {
         host: "www.google.com"
       , path: "/"
       , port: 80
-    }, function(res) {
-      res.destroy();
-      t.assert(res.statusCode < 400 && res.statusCode >= 200, 'GET Google Home page');
-      t.end();
-    }).end();
+      }, function(res) {
+        res.destroy();
+        t.assert(res.statusCode < 400 && res.statusCode >= 200, 'GET Google Home page');
+        t.end();
+      }
+    ).end();
   }
 
   function firstIsDone() {
@@ -1523,20 +1742,22 @@ test("allow unmocked option works", function(t) {
         host: "www.google.com"
       , path: "/does/not/exist/dskjsakdj"
       , port: 80
-    }, function(res) {
-      t.assert(res.statusCode === 404, 'Google say it does not exist');
-      res.on('data', function() {});
-      res.on('end', secondIsDone);
-    }).end();
+      }, function(res) {
+        t.assert(res.statusCode === 404, 'Google say it does not exist');
+        res.on('data', function() {});
+        res.on('end', secondIsDone);
+      }
+    ).end();
   }
 
   http.request({
       host: "www.google.com"
     , path: "/abc"
     , port: 80
-  }, function(res) {
-    res.on('end', firstIsDone);
-  }).end();
+    }, function(res) {
+      res.on('end', firstIsDone);
+    }
+  ).end();
 });
 
 test("default reply headers work", function(t) {
@@ -1590,6 +1811,23 @@ test("JSON encoded replies does not overwrite existing content-type header", fun
     scope.done();
     t.equal(res.statusCode, 200);
     t.equal(res.headers['content-type'], 'unicorns');
+    t.end();
+  }
+
+  http.request({
+      host: 'localhost'
+    , path: '/'
+  }, done).end();
+});
+
+test("blank response doesn't have content-type application/json attached to it", function(t) {
+  var scope = nock('http://localhost')
+    .get('/')
+    .reply(200);
+
+  function done(res) {
+    t.equal(res.statusCode, 200);
+    t.notEqual(res.headers['content-type'], "application/json");
     t.end();
   }
 
@@ -1804,13 +2042,15 @@ test('(re-)activate after restore', function(t) {
     .reply(200, 'Hello, World!');
 
   nock.restore();
+  t.false(nock.isActive());
 
   http.get('http://google.com/', function(res) {
     res.resume();
     res.on('end', function() {
-      t.ok(! scope.isDone());
+      t.ok(!scope.isDone());
 
       nock.activate();
+      t.true(nock.isActive());
       http.get('http://google.com', function(res) {
         res.resume();
         res.on('end', function() {
@@ -1965,14 +2205,38 @@ test('has a req property on the response', function(t) {
 test('disabled real HTTP request', function(t) {
   nock.disableNetConnect();
 
-  try {
-    http.get('http://www.amazon.com', function(res) {
-      throw "should not request this";
-    });
-  } catch(err) {
+  http.get('http://www.amazon.com', function(res) {
+    throw "should not request this";
+  }).on('error', function(err) {
     t.equal(err.message, 'Nock: Not allow net connect for "www.amazon.com:80"');
     t.end();
-  }
+  });
+
+  nock.enableNetConnect();
+});
+
+test('NetConnectNotAllowedError is instance of Error', function(t) {
+  nock.disableNetConnect();
+
+  http.get('http://www.amazon.com', function(res) {
+    throw "should not request this";
+  }).on('error', function (err) {
+    t.type(err, 'Error');
+    t.end();
+  });
+
+  nock.enableNetConnect();
+});
+
+test('NetConnectNotAllowedError exposes the stack', function(t) {
+  nock.disableNetConnect();
+
+  http.get('http://www.amazon.com', function(res) {
+    throw "should not request this";
+  }).on('error', function (err) {
+    t.notEqual(err.stack, undefined);
+    t.end();
+  });
 
   nock.enableNetConnect();
 });
@@ -1980,17 +2244,15 @@ test('disabled real HTTP request', function(t) {
 test('enable real HTTP request only for google.com, via string', function(t) {
   nock.enableNetConnect('google.com');
 
-  try {
-    http.get('http://google.com.br/').on('error', function(err) {
-      throw err;
-    });
+  http.get('http://google.com.br/').on('error', function(err) {
+    throw err;
+  });
 
-    http.get('http://www.amazon.com', function(res) {
-      throw "should not deliver this request"
-    })
-  } catch(err) {
+  http.get('http://www.amazon.com', function(res) {
+    throw "should not deliver this request"
+  }).on('error', function (err) {
     t.equal(err.message, 'Nock: Not allow net connect for "www.amazon.com:80"');
-  }
+  });
 
   t.end();
   nock.enableNetConnect();
@@ -1999,18 +2261,16 @@ test('enable real HTTP request only for google.com, via string', function(t) {
 test('enable real HTTP request only for google.com, via regexp', function(t) {
   nock.enableNetConnect(/google\.com/);
 
-  try {
-    http.get('http://google.com.br/').on('error', function(err) {
-      throw err;
-    });
+  http.get('http://google.com.br/').on('error', function(err) {
+    throw err;
+  });
 
-    http.get('http://www.amazon.com', function(res) {
-      throw "should not request this";
-    });
-  } catch(err) {
+  http.get('http://www.amazon.com', function(res) {
+    throw "should not request this";
+  }).on('error', function (err) {
     t.equal(err.message, 'Nock: Not allow net connect for "www.amazon.com:80"');
     t.end();
-  }
+  });
 
   nock.enableNetConnect();
 });
@@ -2177,17 +2437,20 @@ function checkDuration(t, ms) {
       (fin[0] * 1e+9) +  // seconds -> ms
       (fin[1] * 1e-6); // nanoseconds -> ms
 
+    /// innaccurate timers
+    ms = ms * 0.9;
+
     t.ok(finMs >= ms, 'Duration of ' + Math.round(finMs) + 'ms should be longer than ' + ms + 'ms');
     _end.call(t);
   };
 }
 
 test('calling delay delays the response', function (t) {
-  checkDuration(t, 25);
+  checkDuration(t, 100);
 
   nock('http://funk')
     .get('/')
-    .delay(25)
+    .delay(100)
     .reply(200, 'OK');
 
   http.get('http://funk/', function (res) {
@@ -2209,7 +2472,7 @@ test('calling delay delays the response', function (t) {
 test('using reply callback with delay provides proper arguments', function (t) {
   nock('http://localhost')
     .get('/')
-    .delay(25)
+    .delay(100)
     .reply(200, function (path, requestBody) {
       t.equal(path, '/', 'path arg should be set');
       t.equal(requestBody, 'OK', 'requestBody arg should be set');
@@ -2220,10 +2483,10 @@ test('using reply callback with delay provides proper arguments', function (t) {
 });
 
 test('delay works with replyWithFile', function (t) {
-  checkDuration(t, 25);
+  checkDuration(t, 100);
   nock('http://localhost')
     .get('/')
-    .delay(25)
+    .delay(100)
     .replyWithFile(200, __dirname + '/../assets/reply_file_1.txt');
 
   http.request('http://localhost/', function (res) {
@@ -2243,10 +2506,10 @@ test('delay works with replyWithFile', function (t) {
 });
 
 test('delay works with when you return a generic stream from the reply callback', function (t) {
-  checkDuration(t, 25);
+  checkDuration(t, 100);
   nock('http://localhost')
     .get('/')
-    .delay(25)
+    .delay(100)
     .reply(200, function (path, reqBody) {
       return fs.createReadStream(__dirname + '/../assets/reply_file_1.txt');
     });
@@ -2336,11 +2599,11 @@ if (stream.Readable) {
 }
 
 test('calling delayConnection delays the connection', function (t) {
-  checkDuration(t, 25);
+  checkDuration(t, 100);
 
   nock('http://funk')
     .get('/')
-    .delayConnection(25)
+    .delayConnection(100)
     .reply(200, 'OK');
 
   http.get('http://funk/', function (res) {
@@ -2362,7 +2625,7 @@ test('calling delayConnection delays the connection', function (t) {
 test('using reply callback with delayConnection provides proper arguments', function (t) {
   nock('http://localhost')
     .get('/')
-    .delayConnection(25)
+    .delayConnection(100)
     .reply(200, function (path, requestBody) {
       t.equal(path, '/', 'path arg should be set');
       t.equal(requestBody, 'OK', 'requestBody arg should be set');
@@ -2373,10 +2636,10 @@ test('using reply callback with delayConnection provides proper arguments', func
 });
 
 test('delayConnection works with replyWithFile', function (t) {
-  checkDuration(t, 25);
+  checkDuration(t, 100);
   nock('http://localhost')
     .get('/')
-    .delayConnection(25)
+    .delayConnection(100)
     .replyWithFile(200, __dirname + '/../assets/reply_file_1.txt');
 
   http.request('http://localhost/', function (res) {
@@ -2396,10 +2659,10 @@ test('delayConnection works with replyWithFile', function (t) {
 });
 
 test('delayConnection works with when you return a generic stream from the reply callback', function (t) {
-  checkDuration(t, 25);
+  checkDuration(t, 100);
   nock('http://localhost')
     .get('/')
-    .delayConnection(25)
+    .delayConnection(100)
     .reply(200, function (path, reqBody) {
       return fs.createReadStream(__dirname + '/../assets/reply_file_1.txt');
     });
@@ -2419,3 +2682,793 @@ test('delayConnection works with when you return a generic stream from the reply
     });
   }).end('OK');
 });
+
+test('define() is backward compatible', function(t) {
+  var nockDef = {
+    "scope":"http://example.com",
+    //  "port" has been deprecated
+    "port":12345,
+    "method":"GET",
+    "path":"/",
+    //  "reply" has been deprected
+    "reply":"500"
+  };
+
+  var nocks = nock.define([nockDef]);
+
+  t.ok(nocks);
+
+  var req = new http.request({
+    host: 'example.com',
+    port: nockDef.port,
+    method: nockDef.method,
+    path: nockDef.path
+  }, function(res) {
+    t.equal(res.statusCode, 500);
+
+    res.once('end', function() {
+      t.end();
+    });
+  });
+
+  req.on('error', function(err) {
+    console.error(err);
+    //  This should never happen.
+    t.ok(false, 'Error should never occur.');
+    t.end();
+  });
+
+  req.end();
+
+});
+
+test('define() works with non-JSON responses', function(t) {
+  var nockDef = {
+    "scope":"http://example.com",
+    "method":"POST",
+    "path":"/",
+    "body":"�",
+    "status":200,
+    "response":"�"
+  };
+
+  var nocks = nock.define([nockDef]);
+
+  t.ok(nocks);
+
+  var req = new http.request({
+    host: 'example.com',
+    method: nockDef.method,
+    path: nockDef.path
+  }, function(res) {
+    t.equal(res.statusCode, nockDef.status);
+
+    var dataChunks = [];
+
+    res.on('data', function(chunk) {
+      dataChunks.push(chunk);
+    });
+
+    res.once('end', function() {
+      var response = Buffer.concat(dataChunks);
+      t.equal(response.toString('utf8'), nockDef.response, 'responses match');
+      t.end();
+    });
+  });
+
+  req.on('error', function(err) {
+    console.error(err);
+    //  This should never happen.
+    t.ok(false, 'Error should never occur.');
+    t.end();
+  });
+
+  req.write(nockDef.body);
+  req.end();
+
+});
+
+test('define() works with binary buffers', function(t) {
+  var nockDef = {
+    "scope":"http://example.com",
+    "method":"POST",
+    "path":"/",
+    "body":"8001",
+    "status":200,
+    "response":"8001"
+  };
+
+  var nocks = nock.define([nockDef]);
+
+  t.ok(nocks);
+
+  var req = new http.request({
+    host: 'example.com',
+    method: nockDef.method,
+    path: nockDef.path
+  }, function(res) {
+    t.equal(res.statusCode, nockDef.status);
+
+    var dataChunks = [];
+
+    res.on('data', function(chunk) {
+      dataChunks.push(chunk);
+    });
+
+    res.once('end', function() {
+      var response = Buffer.concat(dataChunks);
+      t.equal(response.toString('hex'), nockDef.response, 'responses match');
+      t.end();
+    });
+  });
+
+  req.on('error', function(err) {
+    console.error(err);
+    //  This should never happen.
+    t.ok(false, 'Error should never occur.');
+    t.end();
+  });
+
+  req.write(new Buffer(nockDef.body, 'hex'));
+  req.end();
+
+});
+
+test('issue #163 - Authorization header isn\'t mocked', function(t) {
+  function makeRequest(cb) {
+    var r = http.request(
+      {
+        hostname: 'www.example.com',
+        path: '/',
+        method: 'GET',
+        auth: 'foo:bar'
+      },
+      function(res) {
+        cb(res.req._headers);
+      }
+    );
+    r.end();
+  }
+
+  makeRequest(function(headers) {
+    var n = nock('http://www.example.com', {
+      reqheaders: { 'authorization': 'Basic Zm9vOmJhcg==' }
+    }).get('/').reply(200);
+
+    makeRequest(function(nockHeader) {
+      n.done();
+      t.equivalent(headers, nockHeader);
+      t.end();
+    });
+  });
+});
+
+test('define() uses reqheaders', function(t) {
+  var nockDef = {
+    "scope":"http://example.com",
+    "method":"GET",
+    "path":"/",
+    "status":200,
+    "reqheaders": {
+      host: 'example.com',
+      'authorization': 'Basic Zm9vOmJhcg=='
+    }
+  };
+
+  var nocks = nock.define([nockDef]);
+
+  t.ok(nocks);
+
+  var req = new http.request({
+    host: 'example.com',
+    method: nockDef.method,
+    path: nockDef.path,
+    auth: 'foo:bar'
+  }, function(res) {
+    t.equal(res.statusCode, nockDef.status);
+
+    res.once('end', function() {
+      t.equivalent(res.req._headers, nockDef.reqheaders);
+      t.end();
+    });
+  });
+  req.end();
+
+});
+
+test('sending binary and receiving JSON should work ', function(t) {
+  var scope = nock('http://example.com')
+    .filteringRequestBody(/.*/, '*')
+    .post('/some/path', '*')
+    .reply(201, { foo: '61' }, {
+      'Content-Type': 'application/json'
+    });
+
+  mikealRequest({
+    method: 'POST',
+    uri: 'http://example.com/some/path',
+    body: new Buffer('ffd8ffe000104a46494600010101006000600000ff', 'hex'),
+    headers: { 'Accept': 'application/json', 'Content-Length': 23861 }
+  }, function(err, res, body) {
+      scope.done();
+
+      t.equal(res.statusCode, 201);
+      t.equal(body.length, 12);
+
+      var json;
+      try {
+        json = JSON.parse(body);
+      } catch (e) {
+        json = {};
+      }
+
+      t.equal(json.foo, '61');
+      t.end();
+    }
+  );
+});
+
+test('fix #146 - resume() is automatically invoked when the response is drained', function(t) {
+  var replyLength = 1024 * 1024;
+  var replyBuffer = new Buffer((new Array(replyLength + 1)).join("."));
+  t.equal(replyBuffer.length, replyLength);
+
+  nock("http://www.abc.com")
+    .get("/abc")
+    .reply(200, replyBuffer);
+
+  needle.get("http://www.abc.com/abc", function(err, res, buffer) {
+    t.notOk(err);
+    t.ok(res);
+    t.ok(buffer);
+    t.equal(buffer, replyBuffer);
+    t.end();
+  });
+});
+
+test("handles get with restify client", function(t) {
+  var scope =
+  nock("https://www.example.com").
+    get("/get").
+    reply(200, 'get');
+
+  var client = restify.createClient({
+    url: 'https://www.example.com'
+  })
+
+  client.get('/get', function(err, req, res) {
+    req.on('result', function(err, res) {
+      res.body = '';
+      res.setEncoding('utf8');
+      res.on('data', function(chunk) {
+        res.body += chunk;
+      });
+
+      res.on('end', function() {
+        t.equal(res.body, 'get')
+        t.end();
+        scope.done();
+      });
+    });
+  });
+});
+
+test("handles post with restify client", function(t) {
+  var scope =
+  nock("https://www.example.com").
+    post("/post", 'hello world').
+    reply(200, 'post');
+
+  var client = restify.createClient({
+    url: 'https://www.example.com'
+  })
+
+  client.post('/post', function(err, req, res) {
+    req.on('result', function(err, res) {
+      res.body = '';
+      res.setEncoding('utf8');
+      res.on('data', function(chunk) {
+        res.body += chunk;
+      });
+
+      res.on('end', function() {
+        t.equal(res.body, 'post')
+        t.end();
+        scope.done();
+      });
+    });
+
+    req.write('hello world');
+    req.end();
+  });
+});
+
+test("handles get with restify JsonClient", function(t) {
+  var scope =
+  nock("https://www.example.com").
+    get("/get").
+    reply(200, {get: 'ok'});
+
+  var client = restify.createJsonClient({
+    url: 'https://www.example.com'
+  })
+
+  client.get('/get', function(err, req, res, obj) {
+    t.equal(obj.get, 'ok');
+    t.end();
+    scope.done();
+  });
+});
+
+test("handles post with restify JsonClient", function(t) {
+  var scope =
+  nock("https://www.example.com").
+    post("/post", {username: 'banana'}).
+    reply(200, {post: 'ok'});
+
+  var client = restify.createJsonClient({
+    url: 'https://www.example.com'
+  })
+
+  client.post('/post', {username: 'banana'}, function(err, req, res, obj) {
+    t.equal(obj.post, 'ok');
+    t.end();
+    scope.done();
+  });
+});
+
+test("handles 404 with restify JsonClient", function(t) {
+  var scope =
+  nock("https://www.example.com").
+    put("/404").
+    reply(404);
+
+  var client = restify.createJsonClient({
+    url: 'https://www.example.com'
+  })
+
+  client.put('/404', function(err, req, res, obj) {
+    t.equal(res.statusCode, 404);
+    t.end();
+    scope.done();
+  });
+});
+
+test("handles 500 with restify JsonClient", function(t) {
+  var scope =
+  nock("https://www.example.com").
+    delete("/500").
+    reply(500);
+
+  var client = restify.createJsonClient({
+    url: 'https://www.example.com'
+  })
+
+  client.del('/500', function(err, req, res, obj) {
+    t.equal(res.statusCode, 500);
+    t.end();
+    scope.done();
+  });
+});
+
+test('test request timeout option', function(t) {
+
+  nock('http://example.com')
+    .get('/test')
+    .reply(200, JSON.stringify({ foo: 'bar' }));
+
+  var options = {
+    url: 'http://example.com/test',
+    method: 'GET',
+    timeout: 2000
+  };
+
+  mikealRequest(options, function(err, res, body) {
+    t.strictEqual(err, null);
+    t.equal(body, '{"foo":"bar"}');
+    t.end();
+  });
+});
+
+
+test('done fails when specified request header is missing', function(t) {
+  scope = nock('http://example.com', {
+    reqheaders: {
+      "X-App-Token": "apptoken",
+      "X-Auth-Token": "apptoken"
+    }
+  })
+  .post('/resource')
+  .reply(200, { status: "ok" });
+
+  d = domain.create();
+
+  d.run(function() {
+    mikealRequest({
+      method: 'POST',
+      uri: 'http://example.com/resource',
+      headers: {
+        "X-App-Token": "apptoken"
+      }
+    });
+  });
+
+  d.once('error', function(err) {
+    t.ok(err.message.match(/No match/));
+    t.end();
+  });
+});
+
+test('done does not fail when specified request header is not missing', function(t) {
+  scope = nock('http://example.com', {
+    reqheaders: {
+      "X-App-Token": "apptoken",
+      "X-Auth-Token": "apptoken"
+    }
+  })
+  .post('/resource')
+  .reply(200, { status: "ok" });
+
+  mikealRequest({
+    method: 'POST',
+    uri: 'http://example.com/resource',
+    headers: {
+      "X-App-Token": "apptoken",
+      "X-Auth-Token": "apptoken"
+    }
+  }, function(err, res, body) {
+    t.type(err, 'null');
+    t.equal(res.statusCode, 200);
+    t.end();
+  });
+
+});
+
+test('mikeal/request with delayConnection and request.timeout', function(t) {
+  endpoint = nock("http://some-server.com")
+    .post("/")
+    .delayConnection(1000)
+    .reply(200, {});
+
+  mikealRequest.post({
+      url: "http://some-server.com/",
+      timeout: 10
+    },
+    function (err) {
+      t.type(err, 'Error');
+      t.equal(err && err.code, "ETIMEDOUT");
+      t.end();
+  });
+});
+
+test("get correct filtering with scope and request headers filtering", function(t) {
+  var responseText = 'OK!';
+  var responseHeaders = { 'Content-Type': 'text/plain'};
+  var requestHeaders = { host: 'a.subdomain.of.google.com' };
+
+  var scope = nock('http://a.subdomain.of.google.com', {
+      filteringScope: function(scope) {
+        return (/^http:\/\/.*\.google\.com/).test(scope);
+      }
+    })
+    .get('/somepath')
+    .reply(200, responseText, responseHeaders);
+
+  var dataCalled = false;
+  var host = 'some.other.subdomain.of.google.com';
+  var req = http.get({
+    host: host,
+    method: 'GET',
+    path: '/somepath',
+    port: 80
+  }, function(res) {
+    res.on('data', function(data) {
+      dataCalled = true;
+      t.equal(data.toString(), responseText);
+    });
+    res.on('end', function() {
+      t.true(dataCalled);
+      scope.done();
+      t.end();
+    });
+  });
+
+  t.equivalent(req._headers, { host: requestHeaders.host });
+
+});
+
+test('mocking succeeds even when mocked and specified request header names have different cases', function(t) {
+  scope = nock('http://example.com', {
+    reqheaders: {
+      "x-app-token": "apptoken",
+      "x-auth-token": "apptoken"
+    }
+  })
+    .post('/resource')
+    .reply(200, { status: "ok" });
+
+  mikealRequest({
+    method: 'POST',
+    uri: 'http://example.com/resource',
+    headers: {
+      "X-App-TOKEN": "apptoken",
+      "X-Auth-TOKEN": "apptoken"
+    }
+  }, function(err, res, body) {
+    t.type(err, 'null');
+    t.equal(res.statusCode, 200);
+    t.end();
+  });
+
+});
+
+test('mocking succeeds even when host request header is not specified', function(t) {
+  scope = nock('http://example.com')
+    .post('/resource')
+    .reply(200, { status: "ok" });
+
+  mikealRequest({
+    method: 'POST',
+    uri: 'http://example.com/resource',
+    headers: {
+      "X-App-TOKEN": "apptoken",
+      "X-Auth-TOKEN": "apptoken"
+    }
+  }, function(err, res, body) {
+    t.type(err, 'null');
+    t.equal(res.statusCode, 200);
+    t.end();
+  });
+
+});
+
+test('mikeal/request with strictSSL: true', function(t) {
+  scope = nock('https://strictssl.com')
+    .post('/what')
+    .reply(200, { status: "ok" });
+
+  mikealRequest({
+    method: 'POST',
+    uri: 'https://strictssl.com/what',
+    strictSSL: true
+  }, function(err, res, body) {
+    t.type(err, 'null');
+    t.equal(res && res.statusCode, 200);
+    t.end();
+  });
+
+});
+
+test('response readable pull stream works as expected', function(t) {
+  scope = nock('http://streamingalltheway.com')
+    .get('/ssstream')
+    .reply(200, "this is the response body yeah");
+
+  var req = http.request({
+        host: "streamingalltheway.com"
+      , path: '/ssstream'
+      , port: 80
+    }, function(res) {
+
+      var responseBody = '';
+      t.equal(res.statusCode, 200);
+      res.on('readable', function() {
+        var chunk;
+        while (null !== (chunk = res.read())) {
+          responseBody += chunk.toString();
+        }
+        if (chunk === null) {
+          t.equal(responseBody, "this is the response body yeah");
+          t.end();
+        }
+      });
+    });
+
+  req.end();
+});
+
+test(".setNoDelay", function(t) {
+  var dataCalled = false
+
+  var scope = nock('http://nodelayyy.com')
+    .get('/yay')
+    .reply(200, "Hi");
+
+  var req = http.request({
+      host: "nodelayyy.com"
+    , path: '/yay'
+    , port: 80
+  }, function(res) {
+
+    t.equal(res.statusCode, 200);
+    res.on('end', t.end.bind(t));
+
+  });
+
+  req.setNoDelay(true);
+
+  req.end();
+});
+
+test("match basic authentication header", function(t) {
+  var username = 'testuser'
+    , password = 'testpassword'
+    , authString = username + ":" + password
+    , encrypted = (new Buffer(authString)).toString( 'base64' );
+
+  var scope = nock('http://www.headdy.com')
+     .get('/')
+     .matchHeader('Authorization', function(val) {
+       var expected = 'Basic ' + encrypted;
+       return val == expected;
+     })
+     .reply(200, "Hello World!");
+
+  http.get({
+     host: "www.headdy.com"
+    , path: '/'
+    , port: 80
+    , auth: authString
+  }, function(res) {
+    res.setEncoding('utf8');
+    t.equal(res.statusCode, 200);
+
+    res.on('data', function(data) {
+      t.equal(data, 'Hello World!');
+    });
+
+    res.on('end', function() {
+      scope.done();
+      t.end();
+    });
+  });
+
+});
+
+test('request emits socket', function(t) {
+  var scope = nock('http://gotzsocketz.com')
+     .get('/')
+     .reply(200, "hey");
+
+  var req = http.get('http://gotzsocketz.com');
+  req.once('socket', function(socket) {
+    t.type(socket, Object);
+    t.type(socket.getPeerCertificate(), 'string');
+    t.end();
+  });
+});
+
+test('socket emits connect and secureConnect', function(t) {
+  t.plan(3);
+
+  var scope = nock('http://gotzsocketz.com')
+     .post('/')
+     .reply(200, "hey");
+
+  var req = http.request({
+      host: "gotzsocketz.com"
+    , path: '/'
+    , method: 'POST'
+  });
+
+  req.on('socket', function(socket) {
+    socket.once('connect', function() {
+      req.end();
+      t.ok(true);
+    });
+    socket.once('secureConnect', function() {
+      t.ok(true);
+    });
+  });
+
+  req.once('response', function(res) {
+    res.setEncoding('utf8');
+    res.on('data', function(d) {
+      t.equal(d, 'hey');
+    });
+  });
+});
+
+test('socket setKeepAlive', function(t) {
+  var scope = nock('http://setkeepalive.com')
+     .get('/')
+     .reply(200, "hey");
+
+  var req = http.get('http://setkeepalive.com');
+  req.once('socket', function(socket) {
+    socket.setKeepAlive(true);
+    t.end();
+  });
+});
+
+test('hyperquest works', function(t) {
+  nock('http://hyperquest.com')
+    .get('/somepath')
+    .reply(200, 'Yay hyperquest!');
+
+  var req = hyperquest('http://hyperquest.com/somepath');
+  var reply = '';
+  req.on('data', function(d) {
+    reply += d;
+  });
+  req.once('end', function() {
+    t.equals(reply, 'Yay hyperquest!');
+    t.end();
+  });
+});
+
+test('remove interceptor for GET resource', function(t) {
+  scope = nock('http://example.org')
+    .get('/somepath')
+    .reply(200, 'hey');
+
+  var mocks = scope.pendingMocks();
+  t.deepEqual(mocks, ['GET http://example.org:80/somepath']);
+
+  var result = nock.removeInterceptor({
+    hostname : 'example.org',
+    path : '/somepath'
+  });
+  t.ok(result, 'result should be true');
+
+  nock('http://example.org')
+    .get('/somepath')
+    .reply(202, 'other-content');
+
+  http.get({
+    host: 'example.org',
+    path : '/somepath'
+  }, function(res) {
+    res.setEncoding('utf8');
+    t.equal(res.statusCode, 202);
+
+    res.on('data', function(data) {
+      t.equal(data, 'other-content');
+    });
+
+    res.on('end', function() {
+      t.end();
+    });
+  });
+});
+
+test('remove interceptor for not found resource', function(t) {
+  var result = nock.removeInterceptor({
+    hostname : 'example.org',
+    path : '/somepath'
+  });
+  t.notOk(result, 'result should be false as no interceptor was found');
+  t.end();
+});
+
+test('isDone() must consider repeated responses', function(t) {
+
+  var scope = nock('http://www.example.com')
+    .get('/')
+    .times(2)
+    .reply(204);
+
+  function makeRequest(callback) {
+    var req = http.request({
+      host: "www.example.com",
+      path: '/',
+      port: 80
+    }, function(res) {
+      t.equal(res.statusCode, 204);
+      res.on('end', callback);
+    });
+    req.end();
+  }
+
+  t.notOk(scope.isDone(), "should not be done before all requests");
+  makeRequest(function() {
+    t.notOk(scope.isDone(), "should not yet be done after the first request");
+    makeRequest(function() {
+      t.ok(scope.isDone(), "should be done after the two requests are made");
+      scope.done();
+      t.end();
+    });
+  });
+
+});
+

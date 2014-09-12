@@ -1,4 +1,5 @@
 # Nock [![Build Status](https://secure.travis-ci.org/pgte/nock.png)](http://travis-ci.org/pgte/nock)
+[![Gitter chat](https://badges.gitter.im/pgte/nock.png)](https://gitter.im/pgte/nock)
 
 Nock is an HTTP mocking and expectations library for Node.js
 
@@ -122,6 +123,29 @@ var scope = nock('http://www.google.com')
    });
 ```
 
+## Specifying headers
+
+### Header field names are case-insensitive
+
+Per [HTTP/1.1 4.2 Message Headers](http://www.w3.org/Protocols/rfc2616/rfc2616-sec4.html#sec4.2) specification, all message headers are case insensitive and thus internally Nock uses lower-case for all field names even if some other combination of cases was specified either in mocking specification or in mocked requests themselves.
+
+### Specifying Request Headers
+
+You can specify the request headers like this:
+
+```
+var scope = nock('http://www.example.com', {
+  reqheaders: {
+    'authorization': 'Basic Auth'
+  }
+})
+   .get('/')
+   .reply(200);
+```
+
+If `reqheaders` is not specified or if `host` is not part of it, Nock will automatically add `host` value to request header.
+
+If no request headers are specified for mocking then Nock will automatically skip matching of request headers. Since `host` header is a special case which may get automatically inserted by Nock, its matching is skipped unless it was *also* specified in the request being mocked.
 
 ### Specifying Reply Headers
 
@@ -251,6 +275,22 @@ var scope = nock('http://myapp.iriscouch.com')
                 });
 ```
 
+## Scope filtering
+
+You can filter the scope (protocol, domain and port through) of a nock through a function. This filtering functions is defined at the moment of defining the nock's scope through its optional `options` parameters:
+
+This can be useful, for instance, if you have a node moduel that randomly changes subdomains to which it sends requests (e.g. Dropbox node module is like that)
+
+```js
+var scope = nock('https://api.dropbox.com', {
+  filteringScope: function(scope) {
+    return /^https:\/\/api[0-9]*.dropbox.com/.test(scope);
+  })
+  .get('/1/metadata/auto/Photos?include_deleted=false&list=true')
+  .reply(200);
+}
+```
+
 ## Path filtering
 
 You can also filter the URLs based on a function.
@@ -276,6 +316,8 @@ var scope = nock('http://api.myservice.com')
                 .get('/ABC')
                 .reply(200, 'user');
 ```
+
+Note that `scope.filteringPath` is not cummulative: it should only be used once per scope.
 
 ## Request Body filtering
 
@@ -321,6 +363,19 @@ You can also use a regexp for the header body.
 ```js
 var scope = nock('http://api.myservice.com')
                 .matchHeader('User-Agent', /Mozilla\/.*/)
+                .get('/')
+                .reply(200, {
+                  data: 'hello world'
+                })
+```
+
+You can also use a function for the header body.
+
+```js
+var scope = nock('http://api.myservice.com')
+                .matchHeader('content-length', function (val) {
+                  return val >= 1000;
+                })
                 .get('/')
                 .reply(200, {
                   data: 'hello world'
@@ -383,13 +438,13 @@ var scope = nock('http://persisssists.con')
   .reply(200, 'Persisting all the way');
 ```
 
-## pendingMocks
+## .pendingMocks()
 
-If a scope is not done, you can inspect the scope to infer which ones are still pending using the `scope.pendingMocks` property:
+If a scope is not done, you can inspect the scope to infer which ones are still pending using the `scope.pendingMocks()` function:
 
 ```js
 if (!scope.isDone()) {
-  console.error('pending mocks: %j', scope.pendingMocks);
+  console.error('pending mocks: %j', scope.pendingMocks());
 }
 ```
 
@@ -478,6 +533,8 @@ nock.recorder.rec();
 // those calls will be outputted to console
 ```
 
+## `dont_print` option
+
 If you just want to capture the generated code into a var as an array you can use:
 
 ```js
@@ -494,7 +551,9 @@ Copy and paste that code into your tests, customize at will, and you're done!
 
 (Remember that you should do this one test at a time).
 
-In case you want to generate the code yourself or pass the test data in some other way, you can pass the `output_objects` option to `rec`:
+## `output_objects` option
+
+In case you want to generate the code yourself or use the test data in some other way, you can pass the `output_objects` option to `rec`:
 
 ```js
 nock.recorder.rec({
@@ -505,21 +564,85 @@ var nockCallObjects = nock.recorder.play();
 ```
 
 The returned call objects have the following properties:
- `scope` - the scope of the call (e.g. `https://github.com`)
 
- `port` - the port of the call (e.g. `80`, `443` or `undefined` if the HTTP request didn't have `options.port` defined)
+* `scope` - the scope of the call including the protocol and non-standard ports (e.g. `'https://github.com:12345'`)
+* `method` - the HTTP verb of the call (e.g. `'GET'`)
+* `path` - the path of the call (e.g. `'/pgte/nock'`)
+* `body` - the body of the call, if any
+* `status` - the HTTP status of the reply (e.g. `200`)
+* `response` - the body of the reply which can be a JSON, string, hex string representing binary buffers or an array of such hex strings (when handling `content-encoded` in reply header)
+* `headers` - the headers of the reply
+* `reqheader` - the headers of the request
 
- `method` - the HTTP verb of the call (e.g. `'GET'`)
+If you save this as a JSON file, you can load them directly through `nock.load(path)`. Then you can post-process them before using them in the tests for example to add them request body filtering (shown here fixing timestamps to match the ones captured during recording):
 
- `path` - the path of the call (e.g. `'/pgte/nock'`)
+```js
+nocks = nock.load(pathToJson);
+nocks.forEach(function(nock) {
+  nock.filteringRequestBody = function(body) {
+    if(typeof(body) !== 'string') {
+      return body;
+    }
 
- `body` - the body of the call, if any
+    return body.replace(/(timestamp):([0-9]+)/g, function(match, key, value) {
+      return key + ':timestampCapturedDuringRecording'
+    });
+  };
+});
+```
 
- `reply` - the HTTP status as string of the reply (e.g. `'200'`)
+Alternatively, if you need to pre-process the captured nock definitions before using them (e.g. to add scope filtering) then you can use `nock.loadDefs(path)` and `nock.define(nockDefs)`. Shown here is scope filtering for Dropbox node module which constantly changes the subdomain to which it sends the requests:
 
- `response` - the body of the reply
+```js
+//  Pre-process the nock definitions as scope filtering has to be defined before the nocks are defined (due to its very hacky nature).
+var nockDefs = nock.loadDefs(pathToJson);
+nockDefs.forEach(function(def) {
+  //  Do something with the definition object e.g. scope filtering.
+  def.options = def.options || {};
+  def.options.filteringScope = function(scope) {
+    return /^https:\/\/api[0-9]*.dropbox.com/.test(scope);
+  };
+}
 
- `headers` - the headers of the reply
+//  Load the nocks from pre-processed definitions.
+var nocks = nock.define(nockDefs);
+```
+
+## `enable_reqheaders_recording` option
+
+Recording request headers by default is deemed more trouble than its worth as some of them depend on the timestamp or other values that may change after the tests have been recorder thus leading to complex postprocessing of recorded tests. Thus by default the request headers are not recorded.
+
+The genuine use cases for recording request headers (e.g. checking authorization) can be handled manually or by using `enable_reqheaders_recording` in `recorder.rec()` options.
+
+```js
+nock.recorder.rec({
+  dont_print: true,
+  output_objects: true,
+  enable_reqheaders_recording: true
+});
+```
+
+Note that even when request headers recording is enabled Nock will never record `user-agent` headers. `user-agent` values change with the version of Node and underlying operating system and are thus useless for matching as all that they can indicate is that the user agent isn't the one that was used to record the tests.
+
+## .removeInterceptor()
+This allows removing a specific interceptor for a url. It's useful when there's a list of common interceptors but one test requires one of them to behave differently.
+
+Examples:
+```js
+nock.removeInterceptor({
+  hostname : 'localhost',
+  path : '/mockedResource'
+});
+```
+
+```js
+nock.removeInterceptor({
+  hostname : 'localhost',
+  path : '/login'
+  method: 'POST'
+  proto : 'https'
+});
+```
 
 # How does it work?
 

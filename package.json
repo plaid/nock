@@ -7,7 +7,7 @@
     "testing",
     "isolation"
   ],
-  "version": "0.28.3",
+  "version": "0.47.0",
   "author": "Pedro Teixeira <pedro.teixeira@gmail.com>",
   "contributors": [
     {
@@ -83,6 +83,7 @@
     },
     {
       "name": "Ivan Erceg",
+      "url": "https://github.com/ierceg",
       "email": "ivan@softwaremarbles.com"
     }
   ],
@@ -94,19 +95,25 @@
     "url": "http://github.com/pgte/nock/issues"
   },
   "engines": [
-    "node >= 0.4.10"
+    "node >= 0.10.0"
   ],
   "main": "./index",
   "dependencies": {
-    "propagate": "0.2.x"
+    "propagate": "0.3.x",
+    "lodash": "2.4.1",
+    "debug": "^1.0.4"
   },
   "devDependencies": {
-    "tap": "*",
+    "aws-sdk": "^2.0.15",
+    "hyperquest": "^0.3.0",
+    "needle": "^0.7.1",
     "request": "*",
-    "superagent": "~0.15.7"
+    "restify": "^2.8.1",
+    "superagent": "~0.15.7",
+    "tap": "*"
   },
   "scripts": {
-    "test": "node node_modules/tap/bin/tap.js tests"
+    "test": "node node_modules/tap/bin/tap.js --dd tests"
   },
   "license": "MIT"
 }
